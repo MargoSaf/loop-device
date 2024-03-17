@@ -9,6 +9,7 @@
 #define OUTPUT_FILE     "/tmp/output"
 #define ROW_LEN	        48
 #define BYTES_PER_ROW   16
+#define HEAD_LEN        7
 
 static int major_num;
 
@@ -34,7 +35,6 @@ static ssize_t chardev_write_in_file(unsigned char *hex_buffer,size_t length, lo
     if (IS_ERR(output_file)) 
     {
         printk(KERN_ALERT "Failed to open output file\n");
-        kfree(hex_buffer); 
         return PTR_ERR(output_file);
     }
     
@@ -43,8 +43,7 @@ static ssize_t chardev_write_in_file(unsigned char *hex_buffer,size_t length, lo
     if (ret < 0) 
     {
         printk(KERN_ALERT "Failed to write data to output file\n");
-        filp_close(output_file, NULL);
-        kfree(hex_buffer); 
+        filp_close(output_file, NULL); 
         return ret;
     }
     
@@ -53,12 +52,13 @@ static ssize_t chardev_write_in_file(unsigned char *hex_buffer,size_t length, lo
     return ret;
 }
 
+
 static ssize_t chardev_write(struct file *file, const char *buffer, size_t length, loff_t *offset)
 {
+    unsigned char *hex_buffer = kmalloc(( length / BYTES_PER_ROW + 2) * ROW_LEN, GFP_KERNEL); 
+    unsigned char row[ROW_LEN - HEAD_LEN];
+    unsigned char last_writen_row[ROW_LEN - HEAD_LEN];
 
-    unsigned char *hex_buffer = NULL; 
-    hex_buffer = kmalloc(( length / BYTES_PER_ROW + 2) * ROW_LEN, GFP_KERNEL); 
-    unsigned char row[ROW_LEN];
     if (!hex_buffer) 
     {
         printk(KERN_ALERT "Failed to allocate memory\n");
@@ -67,14 +67,13 @@ static ssize_t chardev_write(struct file *file, const char *buffer, size_t lengt
     
     size_t total_bytes_read = 0;
     size_t hex_buffer_index = 0;
-
+    bool is_exist = false;
+    
     while(total_bytes_read < length)
     {
-        sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read);
-        hex_buffer_index+=7;
-        // Print hexadecimal representation
+    	size_t row_current_len = 0;
 	size_t i = 0;
-	size_t row_current_len = 0;
+	
 	while ( i < BYTES_PER_ROW && i + total_bytes_read < length) 
 	{
             sprintf(row + row_current_len, " ");
@@ -98,27 +97,44 @@ static ssize_t chardev_write(struct file *file, const char *buffer, size_t lengt
             else
                 i++;
         }
+
+	if(total_bytes_read == 0 || memcmp(last_writen_row, row, ROW_LEN - HEAD_LEN) != 0)
+	{
+            if(is_exist)
+            {
+	        sprintf(hex_buffer + hex_buffer_index, "*\n");
+                hex_buffer_index += 2;
+                is_exist = false;
+            }
+            
+            sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read);
+            hex_buffer_index+=7;
+	    memcpy(hex_buffer + hex_buffer_index, row, row_current_len);
+            hex_buffer_index += row_current_len;
+            memcpy(last_writen_row,row, ROW_LEN - HEAD_LEN);
+            int space_count = ROW_LEN - row_current_len - 1 - HEAD_LEN;
+            if(space_count > 0)
+            {
+    	        sprintf(hex_buffer + hex_buffer_index, "%*s", space_count, " ");
+    	    }
+    	
+    	    hex_buffer_index = hex_buffer_index + space_count;
+            sprintf(hex_buffer + hex_buffer_index, "\n");
+            hex_buffer_index++;
+	}
+        else
+        {
+            is_exist = true;
+        }
+        
         total_bytes_read += i;
         
-        memcpy(hex_buffer + hex_buffer_index, row, row_current_len);
-        hex_buffer_index += row_current_len;
-        
-        int space_count = ROW_LEN - row_current_len - 8;
-        if(space_count > 0)
-        {
-    	    sprintf(hex_buffer + hex_buffer_index, "%*s", space_count, " ");
-    	}
-    	
-    	hex_buffer_index = hex_buffer_index + space_count;
-        sprintf(hex_buffer + hex_buffer_index, "\n");
-        hex_buffer_index++;
-
     }
 
         
 
     sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read);
-    hex_buffer_index+=7;
+    hex_buffer_index += HEAD_LEN;
     
     sprintf(hex_buffer + hex_buffer_index, "\n");
     hex_buffer_index++;
@@ -126,7 +142,7 @@ static ssize_t chardev_write(struct file *file, const char *buffer, size_t lengt
     int ret = chardev_write_in_file(hex_buffer, hex_buffer_index, offset);
    
     kfree(hex_buffer); 
-
+  //  kfree(row); 
     return length;
 }
 
