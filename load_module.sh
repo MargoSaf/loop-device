@@ -17,7 +17,7 @@ mknod /dev/loop_dev c 240 0
 
 # major number could be found in kernel messages, run the following command:  
 # cmd > dmesg
-# last log line should be "Registered a major number N". The N is the device number.
-# To compleate device creatone replace 240 with N and run mknod command again
+# Last log line should be "Registered a major number N". The N is the device number.
+# To complete device creation replace 240 with N and run mknod command again
 
 
