@@ -36,48 +36,51 @@ static int loop_dev_release(struct inode *inode, struct file *file)
     return 0;
 }
 
-// Function to write data to a file
-static ssize_t write_in_file(unsigned char *hex_buffer, size_t length, bool is_file_new)
+// Function to open the file and return the offset
+static loff_t open_file(bool is_file_new, struct file **output_file) 
 {
-    struct file *output_file = NULL;
-    int ret = 0;
     loff_t offset = 0;
     loff_t file_len = 0;
 
     // Open the output file with appropriate flags based on the offset
     if (is_file_new)
-        output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE, 0666);
-    else
+        *output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE, 0644);
+    else 
     {
-        output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_LARGEFILE, 0666);
-        if (!IS_ERR(output_file))
+        *output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_LARGEFILE, 0644);
+        if (!IS_ERR(*output_file)) 
         {
-            file_len = vfs_llseek(output_file, 0, SEEK_END);
+            file_len = vfs_llseek(*output_file, 0, SEEK_END);
             offset = (file_len > 8) ? file_len - 8 : 0;
         }
     }
 
-    if (IS_ERR(output_file))
+    if (IS_ERR(*output_file)) 
     {
         printk(KERN_ALERT "Failed to open output file\n");
-        return PTR_ERR(output_file);
+        return PTR_ERR(*output_file);
     }
+
+    return offset;
+}
+
+// Function to write data to the file
+static ssize_t write_file(struct file *output_file, unsigned char *hex_buffer, size_t length, loff_t offset ) 
+{
+    int ret = 0;
 
     // Write data to the file at the specified offset
     ret = kernel_write(output_file, hex_buffer, length, &offset);
 
-    if (ret < 0)
+    if (ret < 0) 
     {
         printk(KERN_ALERT "Failed to write data to output file\n");
         filp_close(output_file, NULL);
         return ret;
     }
 
-    // Close the output file
-    filp_close(output_file, NULL);
     return ret;
 }
-
 // Function to handle write operations to the loop device
 static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t length, loff_t *offset)
 {
@@ -95,19 +98,15 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
     }
 
     last_file = file;
-
-    unsigned char *hex_buffer = kmalloc((length / BYTES_PER_ROW + 2) * ROW_LEN, GFP_KERNEL);
+    
+    struct file *output_file;
+    loff_t file_offset = open_file(new_file, &output_file);
+    
     unsigned char row[ROW_LEN - HEAD_LEN];
     unsigned char last_written_row[ROW_LEN - HEAD_LEN];
 
-    if (!hex_buffer)
-    {
-        printk(KERN_ALERT "Failed to allocate memory\n");
-        return -ENOMEM;
-    }
 
     size_t total_bytes_read = 0;
-    size_t hex_buffer_index = 0;
     bool is_exist = false;
 
     while (total_bytes_read < length)
@@ -143,35 +142,39 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
         // Check if the current row is different from the last written row
         if (total_bytes_read == 0 || memcmp(last_written_row, row, ROW_LEN - HEAD_LEN) != 0)
         {
+            unsigned char temp[ROW_LEN];
             if (is_exist)
             {
-                // Mark the end of the previous row with an asterisk
-                sprintf(hex_buffer + hex_buffer_index, "*\n");
-                hex_buffer_index += 2;
+                
+                sprintf(temp, "*\n");
+                int ret = write_file(output_file, temp, 2 , file_offset);
+                file_offset+=2;
                 is_exist = false;
             }
-
+            
             // Write the offset of the current row
-            sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read + last_file_len);
-            hex_buffer_index += 7;
+            sprintf(temp, "%07zx", total_bytes_read + last_file_len);
 
             // Copy the current row to the hex buffer
-            memcpy(hex_buffer + hex_buffer_index, row, row_current_len);
-            hex_buffer_index += row_current_len;
+            memcpy(temp + HEAD_LEN, row, row_current_len);
+
             memcpy(last_written_row, row, ROW_LEN - HEAD_LEN);
 
             // Add spaces to fill up the row length
             int space_count = ROW_LEN - row_current_len - 1 - HEAD_LEN;
             if (space_count > 0)
             {
-                sprintf(hex_buffer + hex_buffer_index, "%*s", space_count, " ");
+                sprintf(temp + HEAD_LEN + row_current_len, "%*s", space_count, " ");
             }
 
-            hex_buffer_index = hex_buffer_index + space_count;
-
             // Mark the end of the current row
-            sprintf(hex_buffer + hex_buffer_index, "\n");
-            hex_buffer_index++;
+            sprintf(temp + ROW_LEN -1, "\n");
+            int ret = write_file(output_file, temp, ROW_LEN , file_offset);
+            file_offset+=ROW_LEN;
+            if (ret < 0)
+            {
+              printk(KERN_ALERT "Failed to write data to output file\n");
+            }
         }
         else
         {
@@ -180,25 +183,15 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
 
         total_bytes_read += i;
     }
-
+    unsigned char temp[ROW_LEN];
     // Write the offset of the end of the data
-    sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read + last_file_len);
-    hex_buffer_index += HEAD_LEN;
+    sprintf(temp, "%07zx", total_bytes_read + last_file_len);
+    //file_offset += HEAD_LEN;
 
     // Mark the end of the data
-    sprintf(hex_buffer + hex_buffer_index, "\n");
-    hex_buffer_index++;
-
-    // Update the last file length
+    sprintf(temp + HEAD_LEN, "\n");
+    int ret = write_file(output_file, temp, HEAD_LEN+1 , file_offset);
     last_file_len += total_bytes_read;
-
-    // Write data to the file
-    int ret = write_in_file(hex_buffer, hex_buffer_index, new_file);
-    if (ret < 0)
-    {
-        printk(KERN_ALERT "Failed to write data to output file\n");
-    }
-    kfree(hex_buffer);
 
     return length;
 }
