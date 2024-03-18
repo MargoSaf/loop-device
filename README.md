@@ -8,7 +8,7 @@ hexdump my_file.bin > /tmp/output1
 
 diff /tmp/output /tmp/output1    // No diff
 
-#how to run
+# run the program
 cmd > make // ruild the code
 cmd > insmod loop_dev.ko // Insert the kernel module
 and check the major number for the device:
