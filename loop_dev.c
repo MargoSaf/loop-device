@@ -1,54 +1,63 @@
+
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/hex.h>
-#include <linux/slab.h> 
+#include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/buffer_head.h>
 
 #define DEVICE_NAME     "loop_dev"
 #define OUTPUT_FILE     "/tmp/output"
-#define ROW_LEN	        48
+#define ROW_LEN         48
 #define BYTES_PER_ROW   16
 #define HEAD_LEN        7
 
 static int major_num;
-struct file *last_file;
-static size_t last_file_len = 0;
+// For large files, the loop_dev_write function may be called multiple times until reaching the end of the file.
+// To handle large files effectively, the last_file and last_file_len variables are utilized to keep track of the last file written to and its length.
+struct file *last_file; 
+static size_t last_file_len = 0; 
 
+
+// Function to handle opening of the device
 static int loop_dev_open(struct inode *inode, struct file *file)
 {
     printk(KERN_INFO "loop_dev: Device opened\n");
     return 0;
 }
 
+// Function to handle releasing of the device
 static int loop_dev_release(struct inode *inode, struct file *file)
 {
     printk(KERN_INFO "loop_dev: Device closed\n");
     return 0;
 }
 
-static ssize_t write_in_file(unsigned char *hex_buffer, size_t length, bool is_file_new) 
+// Function to write data to a file
+static ssize_t write_in_file(unsigned char *hex_buffer, size_t length, bool is_file_new)
 {
     struct file *output_file = NULL;
     int ret = 0;
     loff_t offset = 0;
     loff_t file_len = 0;
+
     // Open the output file with appropriate flags based on the offset
     if (is_file_new)
         output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE, 0666);
-    else 
+    else
     {
         output_file = filp_open(OUTPUT_FILE, O_WRONLY | O_LARGEFILE, 0666);
-        if (!IS_ERR(output_file)) 
+        if (!IS_ERR(output_file))
         {
             file_len = vfs_llseek(output_file, 0, SEEK_END);
             offset = (file_len > 8) ? file_len - 8 : 0;
         }
     }
 
-    if (IS_ERR(output_file)) 
+    if (IS_ERR(output_file))
     {
         printk(KERN_ALERT "Failed to open output file\n");
         return PTR_ERR(output_file);
@@ -57,7 +66,7 @@ static ssize_t write_in_file(unsigned char *hex_buffer, size_t length, bool is_f
     // Write data to the file at the specified offset
     ret = kernel_write(output_file, hex_buffer, length, &offset);
 
-    if (ret < 0) 
+    if (ret < 0)
     {
         printk(KERN_ALERT "Failed to write data to output file\n");
         filp_close(output_file, NULL);
@@ -69,43 +78,49 @@ static ssize_t write_in_file(unsigned char *hex_buffer, size_t length, bool is_f
     return ret;
 }
 
-
+// Function to handle write operations to the loop device
 static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t length, loff_t *offset)
 {
     bool new_file = true;
-    if(last_file == file)
-    {
-       new_file = false;
 
-    } else last_file_len = 0;
-    
+    // Check if the current file is the same as the last one
+    if (last_file == file)
+    {
+        new_file = false;
+    }
+    else
+    {
+        // Reset last file length when switching to a new file
+        last_file_len = 0;
+    }
+
     last_file = file;
 
-
-    unsigned char *hex_buffer = kmalloc(( length / BYTES_PER_ROW + 2) * ROW_LEN, GFP_KERNEL); 
+    unsigned char *hex_buffer = kmalloc((length / BYTES_PER_ROW + 2) * ROW_LEN, GFP_KERNEL);
     unsigned char row[ROW_LEN - HEAD_LEN];
-    unsigned char last_writen_row[ROW_LEN - HEAD_LEN];
+    unsigned char last_written_row[ROW_LEN - HEAD_LEN];
 
-    if (!hex_buffer) 
+    if (!hex_buffer)
     {
         printk(KERN_ALERT "Failed to allocate memory\n");
         return -ENOMEM;
     }
-    
+
     size_t total_bytes_read = 0;
     size_t hex_buffer_index = 0;
     bool is_exist = false;
-    
-    while(total_bytes_read < length)
+
+    while (total_bytes_read < length)
     {
-    	size_t row_current_len = 0;
-	size_t i = 0;
-	
-	while ( i < BYTES_PER_ROW && i + total_bytes_read < length) 
-	{
+        size_t row_current_len = 0;
+        size_t i = 0;
+
+        while (i < BYTES_PER_ROW && i + total_bytes_read < length)
+        {
+            // Convert bytes to hex format and store in row
             sprintf(row + row_current_len, " ");
             row_current_len++;
-            if(i + 1 + total_bytes_read < length)
+            if (i + 1 + total_bytes_read < length)
             {
                 sprintf(row + row_current_len, "%02x", buffer[total_bytes_read + i + 1]);
             }
@@ -113,69 +128,82 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
             {
                 sprintf(row + row_current_len, "00");
             }
-		
+
             row_current_len += 2;
-		
+
             sprintf(row + row_current_len, "%02x", buffer[total_bytes_read + i]);
-            row_current_len += 2;	       
-  
-            if(i + 1 + total_bytes_read < length)
+            row_current_len += 2;
+
+            if (i + 1 + total_bytes_read < length)
                 i += 2;
             else
                 i++;
         }
 
-	if(total_bytes_read == 0 || memcmp(last_writen_row, row, ROW_LEN - HEAD_LEN) != 0)
-	{
-            if(is_exist)
+        // Check if the current row is different from the last written row
+        if (total_bytes_read == 0 || memcmp(last_written_row, row, ROW_LEN - HEAD_LEN) != 0)
+        {
+            if (is_exist)
             {
-	        sprintf(hex_buffer + hex_buffer_index, "*\n");
+                // Mark the end of the previous row with an asterisk
+                sprintf(hex_buffer + hex_buffer_index, "*\n");
                 hex_buffer_index += 2;
                 is_exist = false;
             }
-            
+
+            // Write the offset of the current row
             sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read + last_file_len);
-            hex_buffer_index+=7;
-	    memcpy(hex_buffer + hex_buffer_index, row, row_current_len);
+            hex_buffer_index += 7;
+
+            // Copy the current row to the hex buffer
+            memcpy(hex_buffer + hex_buffer_index, row, row_current_len);
             hex_buffer_index += row_current_len;
-            memcpy(last_writen_row,row, ROW_LEN - HEAD_LEN);
+            memcpy(last_written_row, row, ROW_LEN - HEAD_LEN);
+
+            // Add spaces to fill up the row length
             int space_count = ROW_LEN - row_current_len - 1 - HEAD_LEN;
-            if(space_count > 0)
+            if (space_count > 0)
             {
-    	        sprintf(hex_buffer + hex_buffer_index, "%*s", space_count, " ");
-    	    }
-    	
-    	    hex_buffer_index = hex_buffer_index + space_count;
+                sprintf(hex_buffer + hex_buffer_index, "%*s", space_count, " ");
+            }
+
+            hex_buffer_index = hex_buffer_index + space_count;
+
+            // Mark the end of the current row
             sprintf(hex_buffer + hex_buffer_index, "\n");
             hex_buffer_index++;
-	}
+        }
         else
         {
             is_exist = true;
         }
-        
+
         total_bytes_read += i;
-        
     }
 
-        
-
+    // Write the offset of the end of the data
     sprintf(hex_buffer + hex_buffer_index, "%07zx", total_bytes_read + last_file_len);
     hex_buffer_index += HEAD_LEN;
-    
+
+    // Mark the end of the data
     sprintf(hex_buffer + hex_buffer_index, "\n");
     hex_buffer_index++;
-       last_file_len += total_bytes_read;
+
+    // Update the last file length
+    last_file_len += total_bytes_read;
+
+    // Write data to the file
     int ret = write_in_file(hex_buffer, hex_buffer_index, new_file);
-    if (ret < 0) 
+    if (ret < 0)
     {
         printk(KERN_ALERT "Failed to write data to output file\n");
     }
-    kfree(hex_buffer); 
- 
+    kfree(hex_buffer);
+
     return length;
 }
 
+// Structure defining file operations for the loop device
 static struct file_operations fops = {
     .open = loop_dev_open,
     .release = loop_dev_release,
@@ -183,15 +211,19 @@ static struct file_operations fops = {
     .write = loop_dev_write,
 };
 
+// Initialization function for the loop device module
 static int __init loop_dev_init(void)
 {
+    // Register a character device
     major_num = register_chrdev(0, DEVICE_NAME, &fops);
-    if (major_num < 0) {
+    if (major_num < 0)
+    {
         printk(KERN_ALERT "Failed to register a major number\n");
         return major_num;
     }
     printk(KERN_INFO "Registered a major number %d\n", major_num);
     return 0;
+
 }
 
 static void __exit loop_dev_exit(void)
@@ -199,6 +231,7 @@ static void __exit loop_dev_exit(void)
     unregister_chrdev(major_num, DEVICE_NAME);
     printk(KERN_INFO "Unregistered the major number %d\n", major_num);
 }
+
 
 module_init(loop_dev_init);
 module_exit(loop_dev_exit);
