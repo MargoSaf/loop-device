@@ -10,9 +10,16 @@ diff /tmp/output /tmp/output1    // No diff
 
 # run the program
 cmd > make // ruild the code
+
 cmd > insmod loop_dev.ko // Insert the kernel module
+
 and check the major number for the device:
+
 cmd > dmesg
+
 The last log line should be "Registered a major number N". The N is the device number.
+
 To complete device creation replace 240 with N and run last command
+
 cmd > mknod /dev/loop_dev c N 0
+
