@@ -39,6 +39,8 @@ static int loop_dev_release(struct inode *inode, struct file *file)
 // Function to open the file and return the offset
 static loff_t open_file(struct file *input_file, struct file **output_file) 
 {
+    // For large files, the loop_dev_write function may be called multiple times until reaching the end of the file.
+    // checking if the file is new or not
     bool is_file_new = true;
 
     // Check if the current file is the same as the last one
@@ -96,6 +98,7 @@ static ssize_t write_file(struct file *output_file, unsigned char *hex_buffer, s
 
     return ret;
 }
+
 // Function to handle write operations to the loop device
 static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t length, loff_t *offset)
 {
@@ -146,7 +149,11 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
             {
                 
                 sprintf(temp, "*\n");
-                int ret = write_file(output_file, temp, 2 , file_offset);
+                if (write_file(output_file, temp, 2 , file_offset) < 0)
+                {
+                    printk(KERN_ALERT "Failed to write data to output file\n");
+                    return total_bytes_read;
+                }
                 file_offset+=2;
                 is_row_repeating = false;
             }
@@ -156,10 +163,12 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
 
             // Copy the current row to the hex buffer
             memcpy(temp + HEAD_LEN, row, row_current_len);
-
+            
+            // Copy the current row to the last_written_row, for checking is lines repeating or not for next line
             memcpy(last_written_row, row, ROW_LEN);
 
             // Add spaces to fill up the row length
+            // The space count will be 0 for all line, only the last line will be fuild with spaces
             int space_count = ROW_LEN - row_current_len - 1;
             if (space_count > 0)
             {
@@ -168,12 +177,13 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
 
             // Mark the end of the current row
             sprintf(temp + ROW_LEN + HEAD_LEN - 1, "\n");
-            int ret = write_file(output_file, temp, ROW_LEN + HEAD_LEN, file_offset);
-            file_offset += ROW_LEN + HEAD_LEN;
-            if (ret < 0)
+            
+            if (write_file(output_file, temp, ROW_LEN + HEAD_LEN, file_offset) < 0)
             {
-              printk(KERN_ALERT "Failed to write data to output file\n");
+                printk(KERN_ALERT "Failed to write data to output file\n");
+                return total_bytes_read;
             }
+            file_offset += ROW_LEN + HEAD_LEN;
         }
         else
         {
@@ -182,14 +192,17 @@ static ssize_t loop_dev_write(struct file *file, const char *buffer, size_t leng
 
         total_bytes_read += i;
     }
+    
     unsigned char temp[HEAD_LEN + 1];
     // Write the offset of the end of the data
     sprintf(temp, "%07zx", total_bytes_read + last_file_len);
-    //file_offset += HEAD_LEN;
 
     // Mark the end of the data
     sprintf(temp + HEAD_LEN, "\n");
-    int ret = write_file(output_file, temp, HEAD_LEN+1 , file_offset);
+    
+    if (write_file(output_file, temp, HEAD_LEN+1 , file_offset) < 0)
+        printk(KERN_ALERT "Failed to write data to output file\n");
+        
     last_file_len += total_bytes_read;
 
     return length;
